@@ -13,4 +13,4 @@ spec:
   ports:
     - name: web
       port: 9093
-      targetPort: 80
+      targetPort: 9093

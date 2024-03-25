@@ -17,8 +17,9 @@ data:
 
     rule_files:
     - /etc/prometheus/rules.yml
-
+    
     scrape_configs:
+      ############################ prometheus ##############################
       - job_name: 'prometheus'
         static_configs:
         - targets: ['localhost:9090']
@@ -36,6 +37,8 @@ data:
             action: replace
           - action: labelmap
             regex: __meta_kubernetes_node_label_(.+)
+
+      ############################ kubernetes-kubelet ##############################
       - job_name: "kubernetes-kubelet"
         kubernetes_sd_configs:
           - role: node
@@ -47,6 +50,8 @@ data:
         relabel_configs:
           - action: labelmap
             regex: __meta_kubernetes_node_label_(.+)
+
+      ############################ kubernetes-cadvisor ##############################
       - job_name: 'kubernetes-cadvisor'
         scheme: https
         metrics_path: /metrics/cadvisor
@@ -63,6 +68,8 @@ data:
         - source_labels: [__meta_kubernetes_node_name]
           target_label: __metrics_path__
           replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+
+      ############################ kubernetes-apiservers ##############################
       - job_name: "kubernetes-apiservers"
         kubernetes_sd_configs:
           - role: endpoints
@@ -79,6 +86,8 @@ data:
               ]
             action: keep
             regex: default;kubernetes;https
+
+      ############################ kubernetes-endpoints ##############################      
       - job_name: "kubernetes-endpoints"
         kubernetes_sd_configs:
           - role: endpoints
@@ -112,15 +121,78 @@ data:
             action: replace
             target_label: kubernetes_pod_name
 
+      ############################ kube-state-metrics ##############################
+      - job_name: "kube-state-metrics"
+        kubernetes_sd_configs:
+        - role: endpoints
+          namespaces:
+            names: ["kube-system"]
+        relabel_configs:
+        - action: keep
+          source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+          regex: kube-state-metrics
+        - action: labelmap
+          regex: __meta_kubernetes_service_label_(.+)
+        - action: replace
+          source_labels: [__meta_kubernetes_namespace]
+          target_label: k8s_namespace
+        - action: replace
+          source_labels: [__meta_kubernetes_service_name]
+          target_label: k8s_sname
+
   rules.yml: |
     groups:
-    - name: test-node-mem
-      rules:
-      - alert: NodeMemoryUsage
-        expr: (node_memory_MemTotal_bytes - (node_memory_MemFree_bytes + node_memory_Buffers_bytes + node_memory_Cached_bytes)) / node_memory_MemTotal_bytes * 100 > 10
+    - name: Containers-Alarm
+      rules: 
+      ##########Container CPU utilization is above 80%#################
+      - alert: ContainerHighCpuUtilization
+        expr: (sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (pod, container) / sum(container_spec_cpu_quota{container!=""}/container_spec_cpu_period{container!=""}) by (pod, container) * 100) > 5
         for: 2m
         labels:
-          team: node
+          severity: warning
         annotations:
-          summary: "{{$labels.instance}}: High Memory usage detected"
-          description: "{{$labels.instance}}: Memory usage is above 20% (current value is: {{ $value }}"
+          summary: Container High CPU utilization (instance {{ $labels.instance }})
+          description: "Container CPU utilization is above 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}" 
+      - alert: ContainerHighMemoryUsage
+        expr: (sum(container_memory_working_set_bytes{name!=""}) BY (instance, name) / sum(container_spec_memory_limit_bytes > 0) BY (instance, name) * 100) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Container High Memory usage (instance {{ $labels.instance }})
+          description: "Container Memory usage is above 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+      - alert: ContainerVolumeUsage
+        expr: (1 - (sum(container_fs_inodes_free{name!=""}) BY (instance) / sum(container_fs_inodes_total) BY (instance))) * 100 > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Container Volume usage (instance {{ $labels.instance }})
+          description: "Container Volume usage is above 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+
+    - name: Node-Alarm
+      rules:
+      - alert: HostOutOfMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 90) * on(instance) group_left (nodename) node_uname_info{nodename=~".+"}
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host out of memory (instance {{ $labels.instance }})
+          description: "Node memory is filling up (< 10% left)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+      - alert: HostOutOfDiskSpace
+        expr: ((node_filesystem_avail_bytes * 100) / node_filesystem_size_bytes < 90 and ON (instance, device, mountpoint) node_filesystem_readonly == 0) * on(instance) group_left (nodename) node_uname_info{nodename=~".+"}
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host out of disk space (instance {{ $labels.instance }})
+          description: "Disk is almost full (< 10% left)\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
+      - alert: HostHighCpuLoad
+        expr: (sum by (instance) (avg by (mode, instance) (rate(node_cpu_seconds_total{mode!="idle"}[2m]))) > 0.8) * on(instance) group_left (nodename) node_uname_info{nodename=~".+"}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Host high CPU load (instance {{ $labels.instance }})
+          description: "CPU load is > 80%\n  VALUE = {{ $value }}\n  LABELS = {{ $labels }}"
